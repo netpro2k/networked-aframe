@@ -11,6 +11,7 @@ AFRAME.registerComponent('networked-remote', {
   init: function() {
     this.attachTemplate(this.data.template);
     this.attachLerp();
+    this.attachMediaStream();
 
     if (this.el.firstUpdateData) {
       this.firstUpdate();
@@ -21,6 +22,16 @@ AFRAME.registerComponent('networked-remote', {
     var templateChild = document.createElement('a-entity');
     templateChild.setAttribute('template', 'src:' + template);
     this.el.appendChild(templateChild);
+  },
+
+  attachMediaStream: function() {
+      var remoteAudioStream = NAF.c.network.audioStreams[this.data.owner];
+      if(remoteAudioStream) { // @TODO currently all remote entities will emit audio, this is obviously wrong.
+          console.log("Adding remote audio", remoteAudioStream);
+          this.el.setAttribute('media-stream-sound', {
+              mediaStream: remoteAudioStream 
+          });
+      }
   },
 
   attachLerp: function() {

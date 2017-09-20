@@ -1,10 +1,12 @@
 var naf = require('../NafIndex');
+
 var NetworkInterface = require('./NetworkInterface');
 
 class EasyRtcInterface extends NetworkInterface {
   constructor(easyrtc) {
     super();
     this.easyrtc = easyrtc;
+      this.audioStreams = {};
   }
 
   /*
@@ -67,15 +69,18 @@ class EasyRtcInterface extends NetworkInterface {
     var that = this;
 
     this.easyrtc.setStreamAcceptor(function(easyrtcid, stream) {
-      var audioEl = document.createElement("audio");
-      audioEl.setAttribute('id', 'audio-' + easyrtcid);
-      document.body.appendChild(audioEl);
-      that.easyrtc.setVideoObjectSrc(audioEl,stream);
+        console.log("Got stream form " + easyrtcid, stream)
+        that.audioStreams[easyrtcid] = stream;
+      // var audioEl = document.createElement("audio");
+      // audioEl.setAttribute('id', 'audio-' + easyrtcid);
+      // document.body.appendChild(audioEl);
+      // that.easyrtc.setVideoObjectSrc(audioEl,stream);
     });
 
     this.easyrtc.setOnStreamClosed(function (easyrtcid) {
       var audioEl = document.getElementById('audio-' + easyrtcid);
       audioEl.parentNode.removeChild(audioEl);
+        delete that.audioStreams[easyrtcid];
     });
 
     this.easyrtc.initMediaSource(
