@@ -175,7 +175,7 @@ suite('networked-remote', function() {
       component.networkUpdate(entityData);
 
       // Assert
-      var visible = entity.querySelector('.head').components.visible.getData();
+      var visible = entity.querySelector('.head').components.visible.data;
       assert.equal(visible, true);
     }));
 

@@ -102,7 +102,7 @@ suite('NetworkEntities', function() {
       scene.appendChild(entity);
 
       naf.utils.whenEntityLoaded(entity, function() {
-        var componentData = entity.components['networked-remote'].getData();
+        var componentData = entity.components['networked-remote'].data;
 
         assert.equal(componentData.template, '#template1', 'template');
         assert.equal(componentData.networkId, 'test1', 'networkId');

@@ -178,7 +178,7 @@ Components of the root entity can be defined with the name of the component. Com
 
 Once you've defined the schema then add it to the list of schemas by calling `NAF.schemas.add(YOUR_SCHEMA)`.
 
-Component data is retrieved by the A-Frame `getData` function. During the network tick each component's data is checked against its previous synced value; if the data object has changed at all it will be synced across the network.
+Component data is retrieved by the A-Frame `.data` function. During the network tick each component's data is checked against its previous synced value; if the data object has changed at all it will be synced across the network.
 
 
 ### Syncing nested templates - eg. hands
