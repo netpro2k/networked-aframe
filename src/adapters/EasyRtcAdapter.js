@@ -8,6 +8,8 @@ class EasyRtcAdapter extends INetworkAdapter {
     this.app = 'default';
     this.room = 'default';
     this.easyrtc = easyrtc;
+
+    this.audioStreams = {};
   }
 
   setServerUrl(url) {
@@ -129,15 +131,11 @@ class EasyRtcAdapter extends INetworkAdapter {
     var that = this;
 
     this.easyrtc.setStreamAcceptor(function(easyrtcid, stream) {
-      var audioEl = document.createElement("audio");
-      audioEl.setAttribute('id', 'audio-' + easyrtcid);
-      document.body.appendChild(audioEl);
-      that.easyrtc.setVideoObjectSrc(audioEl,stream);
+      that.audioStreams[easyrtcid] = stream;
     });
 
     this.easyrtc.setOnStreamClosed(function (easyrtcid) {
-      var audioEl = document.getElementById('audio-' + easyrtcid);
-      audioEl.parentNode.removeChild(audioEl);
+      delete that.audioStreams[easyrtcid];
     });
 
     this.easyrtc.initMediaSource(

@@ -80,6 +80,17 @@ AFRAME.registerComponent('networked', {
     }
   },
 
+  connectAudioSource: function() {
+    var allRemoteStreams = NAF.connection.adapter.audioStreams;
+    var remoteStream = allRemoteStreams && allRemoteStreams[this.data.owner];
+    var audioSource = this.el.querySelector("[networked-audio-source]");
+
+    if(remoteStream && audioSource) {
+      console.log("Connecting remote audio", remoteStream, audioSource);
+      audioSource.components['networked-audio-source'].setMediaStream(remoteStream);
+    }
+  },
+
   registerEntity: function(networkId) {
     NAF.entities.registerEntity(networkId, this.el);
   },
@@ -149,6 +160,7 @@ AFRAME.registerComponent('networked', {
     var callback = function() {
       var entityData = self.el.firstUpdateData;
       self.networkUpdate(entityData);
+      self.connectAudioSource(); // @TODO this is probably a better place to be doing this
     };
 
     // wait for template to render (and monkey-patching to finish, so next tick), then callback

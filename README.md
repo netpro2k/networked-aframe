@@ -296,6 +296,9 @@ Steps to setup Firebase:
 
 Thanks to [@takahirox](https://github.com/takahirox) for adding Firebase signalling support to NAF!
 
+### Audio
+
+After enabling audio streaming on the `networked-scene` component (and using an adapter that supports it) you will still not hear anything by default. Though the audio will be streaming, it will not be audible until an entity with a `networked-audio-source` is created. The audio from the owner of the entity will be emitted in 3d space from the position of the entity with then `networked-audio-source` attached.
 
 ### Misc
 
