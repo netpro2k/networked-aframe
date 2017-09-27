@@ -57,7 +57,7 @@
 	__webpack_require__(58);
 	__webpack_require__(68);
 	__webpack_require__(74);
-	__webpack_require__(!(function webpackMissingModule() { var e = new Error("Cannot find module \"./components/networked-audio-source\""); e.code = 'MODULE_NOT_FOUND'; throw e; }()));
+	__webpack_require__(75);
 
 /***/ }),
 /* 1 */
@@ -14674,6 +14674,74 @@
 	    this.removeOwnership();
 	    this.unbindOwnershipEvents();
 	  }
+	});
+
+/***/ }),
+/* 75 */
+/***/ (function(module, exports, __webpack_require__) {
+
+	'use strict';
+
+	var naf = __webpack_require__(47);
+
+	AFRAME.registerComponent('networked-audio-source', {
+	  schema: {
+	    positional: { default: true }
+	  },
+
+	  init: function init() {
+	    this.listener = null;
+	    this.stream = null;
+	  },
+
+	  setMediaStream: function setMediaStream(newStream) {
+	    if (!this.sound) {
+	      this.setupSound();
+	    }
+
+	    if (newStream != this.stream) {
+	      if (this.stream) {
+	        this.sound.disconnect();
+	      }
+	      if (newStream) {
+	        var source = this.listener.context.createMediaStreamSource(newStream);
+	        this.sound.setNodeSource(source);
+	      }
+	      this.stream = newStream;
+	    }
+	  },
+
+
+	  remove: function remove() {
+	    if (!this.sound) return;
+
+	    this.el.removeObject3D(this.attrName);
+	    if (this.stream) {
+	      this.sound.disconnect();
+	    }
+	  },
+
+	  setupSound: function setupSound() {
+	    var el = this.el;
+	    var sceneEl = el.sceneEl;
+
+	    if (this.sound) {
+	      el.removeObject3D('sound');
+	    }
+
+	    if (!sceneEl.audioListener) {
+	      sceneEl.audioListener = new THREE.AudioListener();
+	      sceneEl.camera && sceneEl.camera.add(sceneEl.audioListener);
+	      sceneEl.addEventListener('camera-set-active', function (evt) {
+	        evt.detail.cameraEl.getObject3D('camera').add(sceneEl.audioListener);
+	      });
+	    }
+	    this.listener = sceneEl.audioListener;
+
+	    this.sound = this.data.positional ? new THREE.PositionalAudio(this.listener) : new THREE.Audio(this.listener);
+	    el.setObject3D(this.attrName, this.sound);
+	  }
+
 	});
 
 /***/ })
