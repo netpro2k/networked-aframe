@@ -2805,6 +2805,11 @@
 	      this.notImplemented('getConnectStatus');
 	    }
 	  }, {
+	    key: 'getAudioStream',
+	    value: function getAudioStream(clientId) {
+	      return Promise.reejct("Interface method not implemented: getAudioStream");
+	    }
+	  }, {
 	    key: 'sendData',
 	    value: function sendData(clientId, dataType, data) {
 	      this.notImplemented('sendData');
@@ -3143,6 +3148,7 @@
 	    _this.easyrtc = easyrtc;
 
 	    _this.audioStreams = {};
+	    _this.pendingAudioRequest = {};
 	    return _this;
 	  }
 
@@ -3270,6 +3276,20 @@
 	        return INetworkAdapter.CONNECTING;
 	      }
 	    }
+	  }, {
+	    key: 'getAudioStream',
+	    value: function getAudioStream(clientId) {
+	      var that = this;
+	      if (this.audioStreams[clientId]) {
+	        naf.log.write("Already had audio for " + clientId);
+	        return Promise.resolve(this.audioStreams[clientId]);
+	      } else {
+	        naf.log.write("Wating on audio for " + clientId);
+	        return new Promise(function (resolve) {
+	          that.pendingAudioRequest[clientId] = resolve;
+	        });
+	      }
+	    }
 
 	    /**
 	     * Privates
@@ -3282,6 +3302,11 @@
 
 	      this.easyrtc.setStreamAcceptor(function (easyrtcid, stream) {
 	        that.audioStreams[easyrtcid] = stream;
+	        if (that.pendingAudioRequest[easyrtcid]) {
+	          naf.log.write("got pending audio for " + easyrtcid);
+	          that.pendingAudioRequest[easyrtcid](stream);
+	          delete that.pendingAudioRequest[easyrtcid](stream);
+	        }
 	      });
 
 	      this.easyrtc.setOnStreamClosed(function (easyrtcid) {
@@ -13747,14 +13772,10 @@
 	  },
 
 	  connectAudioSource: function connectAudioSource() {
-	    var allRemoteStreams = NAF.connection.adapter.audioStreams;
-	    var remoteStream = allRemoteStreams && allRemoteStreams[this.data.owner];
 	    var audioSource = this.el.querySelector("[networked-audio-source]");
+	    if (!audioSource) return;
 
-	    if (remoteStream && audioSource) {
-	      console.log("Connecting remote audio", remoteStream, audioSource);
-	      audioSource.components['networked-audio-source'].setMediaStream(remoteStream);
-	    }
+	    NAF.connection.adapter.getAudioStream(this.data.owner).then(audioSource.components['networked-audio-source'].setMediaStream);
 	  },
 
 	  registerEntity: function registerEntity(networkId) {
@@ -14692,6 +14713,8 @@
 	  init: function init() {
 	    this.listener = null;
 	    this.stream = null;
+
+	    this.setMediaStream = this.setMediaStream.bind(this);
 	  },
 
 	  setMediaStream: function setMediaStream(newStream) {
