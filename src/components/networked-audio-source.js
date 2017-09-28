@@ -8,6 +8,8 @@ AFRAME.registerComponent('networked-audio-source', {
   init: function () {
     this.listener = null;
     this.stream = null;
+
+    this.setMediaStream = this.setMediaStream.bind(this);
   },
 
   setMediaStream(newStream) {

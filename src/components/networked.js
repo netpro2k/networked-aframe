@@ -81,14 +81,11 @@ AFRAME.registerComponent('networked', {
   },
 
   connectAudioSource: function() {
-    var allRemoteStreams = NAF.connection.adapter.audioStreams;
-    var remoteStream = allRemoteStreams && allRemoteStreams[this.data.owner];
     var audioSource = this.el.querySelector("[networked-audio-source]");
+    if(!audioSource) return;
 
-    if(remoteStream && audioSource) {
-      console.log("Connecting remote audio", remoteStream, audioSource);
-      audioSource.components['networked-audio-source'].setMediaStream(remoteStream);
-    }
+    NAF.connection.adapter.getAudioStream(this.data.owner)
+      .then(audioSource.components['networked-audio-source'].setMediaStream);
   },
 
   registerEntity: function(networkId) {
