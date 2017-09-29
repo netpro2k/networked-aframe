@@ -2810,6 +2810,11 @@
 	      return Promise.reejct("Interface method not implemented: getAudioStream");
 	    }
 	  }, {
+	    key: 'enableMicrophone',
+	    value: function enableMicrophone(enabled) {
+	      this.notImplemented('enableMicrophone');
+	    }
+	  }, {
 	    key: 'sendData',
 	    value: function sendData(clientId, dataType, data) {
 	      this.notImplemented('sendData');
@@ -3298,6 +3303,11 @@
 	          that.pendingAudioRequest[clientId] = resolve;
 	        });
 	      }
+	    }
+	  }, {
+	    key: 'enableMicrophone',
+	    value: function enableMicrophone(enabled) {
+	      this.easyrtc.enableMicrophone(enabled);
 	    }
 
 	    /**
