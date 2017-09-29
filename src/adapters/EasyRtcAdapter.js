@@ -145,6 +145,9 @@ class EasyRtcAdapter extends INetworkAdapter {
     }
   }
 
+  enableMicrophone(enabled) {
+    this.easyrtc.enableMicrophone(enabled);
+  }
 
   /**
    * Privates
