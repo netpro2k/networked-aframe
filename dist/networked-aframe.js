@@ -3244,7 +3244,8 @@
 	  }, {
 	    key: 'sendData',
 	    value: function sendData(clientId, dataType, data) {
-	      this.easyrtc.sendPeerMessage(clientId, dataType, data);
+	      // send via webrtc otherwise fallback to websockets
+	      this.easyrtc.sendData(clientId, dataType, data);
 	    }
 	  }, {
 	    key: 'sendDataGuaranteed',
@@ -3254,8 +3255,16 @@
 	  }, {
 	    key: 'broadcastData',
 	    value: function broadcastData(dataType, data) {
-	      var destination = { targetRoom: this.room };
-	      this.easyrtc.sendPeerMessage(destination, dataType, data);
+	      var roomOccupants = this.easyrtc.getRoomOccupantsAsMap(this.room);
+
+	      // Iterate over the keys of the easyrtc room occupants map.
+	      // getRoomOccupantsAsArray uses Object.keys which allocates memory.
+	      for (var roomOccupant in roomOccupants) {
+	        if (roomOccupants.hasOwnProperty(roomOccupant) && roomOccupant !== this.easyrtc.myEasyrtcid) {
+	          // send via webrtc otherwise fallback to websockets
+	          this.easyrtc.sendData(roomOccupant, dataType, data);
+	        }
+	      }
 	    }
 	  }, {
 	    key: 'broadcastDataGuaranteed',
