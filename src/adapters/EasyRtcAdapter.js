@@ -8,6 +8,9 @@ class EasyRtcAdapter extends INetworkAdapter {
     this.app = 'default';
     this.room = 'default';
     this.easyrtc = easyrtc;
+
+    this.audioStreams = {};
+    this.pendingAudioRequest = {};
   }
 
   setServerUrl(url) {
@@ -120,6 +123,19 @@ class EasyRtcAdapter extends INetworkAdapter {
     }
   }
 
+  getAudioStream(clientId) {
+    var that = this;
+    if(this.audioStreams[clientId]) {
+      naf.log.write("Already had audio for " + clientId);
+      return Promise.resolve(this.audioStreams[clientId]);
+    } else {
+      naf.log.write("Wating on audio for " + clientId);
+      return new Promise(function(resolve) {
+        that.pendingAudioRequest[clientId] = resolve;
+      });
+    }
+  }
+
 
   /**
    * Privates
@@ -129,15 +145,16 @@ class EasyRtcAdapter extends INetworkAdapter {
     var that = this;
 
     this.easyrtc.setStreamAcceptor(function(easyrtcid, stream) {
-      var audioEl = document.createElement("audio");
-      audioEl.setAttribute('id', 'audio-' + easyrtcid);
-      document.body.appendChild(audioEl);
-      that.easyrtc.setVideoObjectSrc(audioEl,stream);
+      that.audioStreams[easyrtcid] = stream;
+      if(that.pendingAudioRequest[easyrtcid]) {
+        naf.log.write("got pending audio for " + easyrtcid);
+        that.pendingAudioRequest[easyrtcid](stream);
+        delete that.pendingAudioRequest[easyrtcid](stream);
+      }
     });
 
     this.easyrtc.setOnStreamClosed(function (easyrtcid) {
-      var audioEl = document.getElementById('audio-' + easyrtcid);
-      audioEl.parentNode.removeChild(audioEl);
+      delete that.audioStreams[easyrtcid];
     });
 
     this.easyrtc.initMediaSource(

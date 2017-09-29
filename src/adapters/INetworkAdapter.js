@@ -19,6 +19,8 @@ class INetworkAdapter extends NafInterface {
   closeStreamConnection(clientId) {this.notImplemented('closeStreamConnection')}
   getConnectStatus(clientId) {this.notImplemented('getConnectStatus')}
 
+  getAudioStream(clientId) { return Promise.reejct("Interface method not implemented: getAudioStream")}
+
   sendData(clientId, dataType, data) {this.notImplemented('sendData')}
   sendDataGuaranteed(clientId, dataType, data) {this.notImplemented('sendDataGuaranteed')}
   broadcastData(dataType, data) {this.notImplemented('broadcastData')}
