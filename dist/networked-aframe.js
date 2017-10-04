@@ -1796,7 +1796,10 @@
 	naf.physics = physics;
 	naf.log = new NafLogger();
 	naf.schemas = new Schemas();
-	naf.version = "0.3.0";
+	naf.version = "0.3.1";
+	naf.isConnected = function () {
+	  return !!naf.clientId;
+	};
 
 	var entities = new NetworkEntities();
 	var connection = new NetworkConnection(entities);
@@ -2338,8 +2341,12 @@
 	      var children = this.childCache.getChildren(parentId);
 	      for (var i = 0; i < children.length; i++) {
 	        var childEntityData = children[i];
-	        var childEntity = this.createRemoteEntity(childEntityData);
 	        var childId = childEntityData.networkId;
+	        if (this.hasEntity(childId)) {
+	          console.warn("Tried to instantiate entity multiple times", childId, childEntityData, "Existing entity:", this.getEntity(childId));
+	          continue;
+	        }
+	        var childEntity = this.createRemoteEntity(childEntityData);
 	        this.createAndAppendChildren(childId, childEntity);
 	        parentEntity.appendChild(childEntity);
 	      }
@@ -2367,10 +2374,10 @@
 	    }
 	  }, {
 	    key: 'completeSync',
-	    value: function completeSync() {
+	    value: function completeSync(targetClientId) {
 	      for (var id in this.entities) {
 	        if (this.entities.hasOwnProperty(id)) {
-	          this.entities[id].emit('syncAll', null, false);
+	          this.entities[id].emit("syncAll", { targetClientId: targetClientId, takeover: false }, false);
 	        }
 	      }
 	    }
@@ -2628,7 +2635,7 @@
 	    value: function dataChannelOpen(clientId) {
 	      NAF.log.write('Opened data channel from ' + clientId);
 	      this.activeDataChannels[clientId] = true;
-	      this.entities.completeSync();
+	      this.entities.completeSync(clientId);
 
 	      var evt = new CustomEvent('clientConnected', { detail: { clientId: clientId } });
 	      document.body.dispatchEvent(evt);
@@ -13728,7 +13735,7 @@
 	    var wasCreatedByNetwork = this.wasCreatedByNetwork();
 
 	    this.onConnected = bind(this.onConnected, this);
-	    this.syncAll = bind(this.syncAll, this);
+	    this.onSyncAll = bind(this.onSyncAll, this);
 	    this.syncDirty = bind(this.syncDirty, this);
 	    this.networkUpdateHandler = bind(this.networkUpdateHandler, this);
 
@@ -13751,8 +13758,12 @@
 	      this.registerEntity(data.networkId);
 	    }
 
-	    if (this.data.owner === '') {
-	      this.checkConnected();
+	    if (this.data.owner === "") {
+	      this.setNetworkIdWhenConnected();
+	      // Only send the initial sync if we are connected. Otherwise this gets sent when the dataChannel is opened with each peer. Note that this only works because the reliable messages are sent over a single websocket connection. If they are sent over a different transport this check may need to change
+	      if (NAF.isConnected()) {
+	        this.syncAll();
+	      }
 	    }
 
 	    document.body.dispatchEvent(this.entityCreatedEvent());
@@ -13883,7 +13894,7 @@
 	    }
 	  },
 
-	  checkConnected: function checkConnected() {
+	  setNetworkIdWhenConnected: function setNetworkIdWhenConnected() {
 	    if (NAF.clientId) {
 	      this.onConnected();
 	    } else {
@@ -13897,7 +13908,6 @@
 
 	  onConnected: function onConnected() {
 	    this.data.owner = NAF.clientId;
-	    this.syncAll();
 	  },
 
 	  isMine: function isMine() {
@@ -13910,9 +13920,9 @@
 
 	  bindEvents: function bindEvents() {
 	    var el = this.el;
-	    el.addEventListener('sync', this.syncDirty);
-	    el.addEventListener('syncAll', this.syncAll);
-	    el.addEventListener('networkUpdate', this.networkUpdateHandler);
+	    el.addEventListener("sync", this.syncDirty);
+	    el.addEventListener("syncAll", this.onSyncAll);
+	    el.addEventListener("networkUpdate", this.networkUpdateHandler);
 	  },
 
 	  pause: function pause() {
@@ -13921,9 +13931,9 @@
 
 	  unbindEvents: function unbindEvents() {
 	    var el = this.el;
-	    el.removeEventListener('sync', this.syncDirty);
-	    el.removeEventListener('syncAll', this.syncAll);
-	    el.removeEventListener('networkUpdate', this.networkUpdateHandler);
+	    el.removeEventListener("sync", this.syncDirty);
+	    el.removeEventListener("syncAll", this.onSyncAll);
+	    el.removeEventListener("networkUpdate", this.networkUpdateHandler);
 	  },
 
 	  tick: function tick() {
@@ -13932,9 +13942,17 @@
 	    }
 	  },
 
+	  onSyncAll: function onSyncAll(e) {
+	    var _e$detail = e.detail,
+	        takeover = _e$detail.takeover,
+	        targetClientId = _e$detail.targetClientId;
+
+	    this.syncAll(takeover, targetClientId);
+	  },
+
 	  /* Sending updates */
 
-	  syncAll: function syncAll(takeover) {
+	  syncAll: function syncAll(takeover, targetClientId) {
 	    if (!this.canSync()) {
 	      return;
 	    }
@@ -13942,8 +13960,12 @@
 	    var syncedComps = this.getAllSyncedComponents();
 	    var components = componentHelper.gatherComponentsData(this.el, syncedComps);
 	    var syncData = this.createSyncData(components, takeover);
-	    NAF.connection.broadcastDataGuaranteed('u', syncData);
 	    // console.error('syncAll', syncData, NAF.clientId);
+	    if (targetClientId) {
+	      NAF.connection.sendDataGuaranteed(targetClientId, "u", syncData);
+	    } else {
+	      NAF.connection.broadcastDataGuaranteed("u", syncData);
+	    }
 	    this.updateCache(components);
 	  },
 
