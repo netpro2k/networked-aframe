@@ -1,11 +1,12 @@
 var SimplePeer = require("simple-peer");
-var INetworkAdapter = require('./INetworkAdapter');
+var INetworkAdapter = require("./INetworkAdapter");
+var WebRtcPeer = require("./WebRtcPeer");
 
-var charSet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+var charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
 function randomString(len) {
-  var str = '';
-  
+  var str = "";
+
   for (var i = 0; i < len; i++) {
     var randomPoz = Math.floor(Math.random() * charSet.length);
     str += charSet.substring(randomPoz, randomPoz + 1);
@@ -15,33 +16,36 @@ function randomString(len) {
 }
 
 class JanusAdapter extends INetworkAdapter {
-
   constructor() {
     super();
-    
-    this.app = 'default';
-    this.room = 'default';
+
+    this.app = "default";
+    this.room = "default";
     this.userId = randomString(12);
 
-    this.signalServer = null;
-    this.signalServerUrl = null;
-    this.signalSessionId = null;
-    this.signalTranactions = {};
+    this.janusServer = null;
+    this.janusServerUrl = null;
+    this.janusSessionId = null;
+    this.transactions = {};
     this.transactionTimeouts = {};
     this.retproxyHandle = null;
 
     this.rtcPeer = null;
+    this.unreliableChannel = null;
+    this.reliableChannel = null;
 
     this.connectedClients = [];
 
-    this.onSignalConnect = this.onSignalConnect.bind(this);
     this.onSignalError = this.onSignalError.bind(this);
     this.onSignalMessage = this.onSignalMessage.bind(this);
     this.sendKeepAliveMessage = this.sendKeepAliveMessage.bind(this);
+    this.onNegotiationNeeded = this.onNegotiationNeeded.bind(this);
+    this.onDataChannelMessage = this.onDataChannelMessage.bind(this);
+    this.onIceCandidate = this.onIceCandidate.bind(this);
   }
 
   setServerUrl(url) {
-    this.signalServerUrl = url;
+    this.janusServerUrl = url;
   }
 
   setApp(app) {
@@ -72,80 +76,153 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   connect() {
-    this.signalServer = new WebSocket(this.signalServerUrl, 'janus-protocol');
+    this.janusServer = new WebSocket(this.janusServerUrl, "janus-protocol");
 
-    this.signalServer.addEventListener('open', this.onSignalConnect);
-    this.signalServer.addEventListener('error', this.onSignalError);
-    this.signalServer.addEventListener('message', this.onSignalMessage);
-  }
-
-  onSignalConnect() {
-    console.log("Signal server connected.");
-    this.setupWebRtcPeer();
+    this.janusServer.addEventListener("open", _ => this.setupWebRtcPeer());
+    this.janusServer.addEventListener("error", this.onSignalError);
+    this.janusServer.addEventListener("message", this.onSignalMessage);
   }
 
   async setupWebRtcPeer() {
-    var sessionResponse = await this.sendSignalMessagePromise({
-      janus: "create"
-    }, 30000);
+    // Create the Janus Session
+    var sessionResponse = await this.sendSignalMessagePromise(
+      {
+        janus: "create"
+      },
+      30000
+    );
 
-    this.signalSessionId = sessionResponse.data.id;
-    
-    var retproxyResponse = await this.sendSignalMessagePromise({
-      janus: "attach",
-      session_id: this.signalSessionId,
-      plugin: "janus.plugin.retproxy",
-      "opaque_id": this.userId,
-      "force-bundle":true,
-      "force-rtcp-mux":true
-    }, 30000);
+    this.janusSessionId = sessionResponse.data.id;
+
+    // Send keep alive messages now and then every 30 seconds.
+    // TODO: only send keep alive messages after 30 seconds of inactivity.
+    this.sendKeepAliveMessage();
+
+    // Attach Reticulum proxy plugin to Janus.
+    var retproxyResponse = await this.sendSignalMessagePromise(
+      {
+        janus: "attach",
+        session_id: this.janusSessionId,
+        plugin: "janus.plugin.retproxy",
+        "force-bundle": true,
+        "force-rtcp-mux": true
+      },
+      30000
+    );
 
     this.retproxyHandle = retproxyResponse.data.id;
 
-    this.rtcPeer = new SimplePeer({ initiator: true });
-
-    this.rtcPeer.on("signal", (message) => {
-      if (message.type === "offer") {
-        this.sendOfferMessage(message);
-      } else if (message.candidate) {
-        this.sendCandidateMessage(message.candidate);
-      }
-    });
-    
-    this.rtcPeer.on("error", (error) => {
-      console.error("RTCPeer error:", error);
+    // Create a new WebRTC peer. All other client data will be multiplexed through this connection.
+    this.rtcPeer = new RTCPeerConnection({
+      iceServers: [
+        {
+          urls: "stun:stun.l.google.com:19302"
+        },
+        {
+          urls: "stun:global.stun.twilio.com:3478?transport=udp"
+        }
+      ]
     });
 
-    this.rtcPeer.on("connect", () => {
-      console.log("RTCPeer connected.");
+    this.unreliableChannel = this.rtcPeer.createDataChannel("unreliable", {
+      ordered: false,
+      maxRetransmits: 0
     });
 
-    this.rtcPeer.on("data", (data) => {
-      console.log("RTCPeer data received:", data);
+    this.unreliableChannel.addEventListener(
+      "message",
+      this.onDataChannelMessage
+    );
+
+    this.reliableChannel = this.rtcPeer.createDataChannel("reliable", {
+      ordered: true
     });
 
-    this.sendKeepAliveMessage();
-  }
+    this.reliableChannel.addEventListener("message", this.onDataChannelMessage);
 
-  sendOfferMessage(jsep) {
-    this.sendSignalMessage({
-      janus: "message",
-      body: {
-        kind: "publisher"
+    this.rtcPeer.addEventListener("icecandidate", this.onIceCandidate);
+
+    var offer = await this.rtcPeer.createOffer();
+    await this.rtcPeer.setLocalDescription(offer);
+
+    var answer = await this.sendSignalMessagePromise(
+      {
+        janus: "message",
+        body: {
+          kind: "publisher"
+        },
+        session_id: this.janusSessionId,
+        handle_id: this.retproxyHandle,
+        jsep
       },
-      session_id: this.signalSessionId,
-      handle_id: this.retproxyHandle,
-      jsep
-    });
+      3000
+    );
+
+    await this.rtcPeer.setRemoteDescription(answer.jsep);
+
+    this.connectSuccess();
   }
 
-  sendCandidateMessage(candidate) {
+  onIceCandidate(event) {
+    var candidate = event.candidate || { completed: true };
+
     this.sendSignalMessage({
       janus: "trickle",
-      session_id: this.signalSessionId,
+      session_id: this.janusSessionId,
       handle_id: this.retproxyHandle,
-      candidate,
+      candidate
     });
+  }
+
+  sendSignalMessagePromise(message, timeout) {
+    return new Promise((resolve, reject) => {
+      this.sendSignalMessage(
+        message,
+        (error, response) => {
+          if (error !== undefined) {
+            reject(error);
+            return;
+          }
+
+          resolve(response);
+        },
+        timeout
+      );
+    });
+  }
+
+  sendKeepAliveMessage() {
+    this.sendSignalMessage({
+      janus: "keepalive",
+      session_id: this.janusSessionId
+    });
+
+    this.keepAliveTimeout = setTimeout(
+      () => this.sendKeepAliveMessage(),
+      30000
+    );
+  }
+
+  sendSignalMessage(message, callback, timeout) {
+    if (this.janusServer !== null && this.janusServer.readyState === 1) {
+      var transaction = (message.transaction = randomString(12));
+      this.janusServer.send(JSON.stringify(message));
+
+      if (callback !== undefined) {
+        this.transactions[transaction] = callback;
+      }
+
+      if (timeout !== undefined) {
+        this.transactionTimeouts[transaction] = setTimeout(() => {
+          callback(new Error("Transaction timed out"));
+        }, timeout);
+      }
+
+      return transaction;
+    }
+
+    // TODO: Should it throw an error or return null?
+    return null;
   }
 
   onSignalError(error) {
@@ -155,7 +232,7 @@ class JanusAdapter extends INetworkAdapter {
   onSignalMessage(message) {
     var json = JSON.parse(message.data);
 
-    switch(json.janus) {
+    switch (json.janus) {
       case "success":
         this.onSignalMessageSuccess(json);
         break;
@@ -176,46 +253,12 @@ class JanusAdapter extends INetworkAdapter {
     }
   }
 
-  sendSignalMessage(message, callback, timeout) {
-    if (this.isSignalServerConnected()) {
-      var transaction = message.transaction = randomString(12);
-      this.signalServer.send(JSON.stringify(message));
-
-      if (callback !== undefined) {
-        this.signalTranactions[transaction] = callback;
-      }
-
-      if (timeout !== undefined) {
-        this.transactionTimeouts[transaction] = setTimeout(() => {
-          callback(new Error("Transaction timed out"));
-        }, timeout);
-      }
-
-      return transaction;
-    }
-
-    // TODO: Should it throw an error or return null?
-    return null;
-  }
-
-  sendSignalMessagePromise(message, timeout) {
-    return new Promise((resolve, reject) => {
-      this.sendSignalMessage(message, (error, response) => {
-        if (error !== undefined) {
-          reject(error);
-          return;
-        }
-
-        resolve(response);
-      }, timeout);
-    });
-  }
-
   onSignalMessageSuccess(message) {
     var transaction = message.transaction;
-    
-    if (transaction && this.signalTranactions[transaction]) {
-      this.signalTranactions[transaction](undefined, message);
+
+    if (transaction && this.transactions[transaction]) {
+      console.log("Signal message success", message);
+      this.transactions[transaction](undefined, message);
 
       if (this.transactionTimeouts[transaction]) {
         clearTimeout(this.transactionTimeouts[transaction]);
@@ -225,9 +268,9 @@ class JanusAdapter extends INetworkAdapter {
 
   onSignalMessageError(message) {
     var transaction = message.transaction;
-    
-    if (transaction && this.signalTranactions[transaction]) {
-      this.signalTranactions[transaction](new Error(message.error));
+
+    if (transaction && this.transactions[transaction]) {
+      this.transactions[transaction](new Error(message.error));
 
       if (this.transactionTimeouts[transaction]) {
         clearTimeout(this.transactionTimeouts[transaction]);
@@ -238,12 +281,15 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   onSignalMessageEvent(message) {
-    if (message.sender === this.retproxyHandle) {
-      if (message.jsep !== undefined) {
-        this.rtcPeer.signal(message.jsep);
+    var transaction = message.transaction;
+
+    if (transaction && this.transactions[transaction]) {
+      console.log("Signal message event", message);
+      this.transactions[transaction](undefined, message);
+
+      if (this.transactionTimeouts[transaction]) {
+        clearTimeout(this.transactionTimeouts[transaction]);
       }
-    } else {
-      console.log("Unhandled event:", event);
     }
   }
 
@@ -253,22 +299,12 @@ class JanusAdapter extends INetworkAdapter {
 
   onSignalMessageWebRtcUp(message) {
     console.log("WebRTC Up!", message);
-    this.openListener()
+    this.openListener();
   }
 
-  isSignalServerConnected() {
-    return this.signalServer !== null && this.signalServer.readyState === 1;
-  }
-
-  sendKeepAliveMessage() {
-    console.log("sendKeepAliveMessage");
-
-    this.sendSignalMessage({
-      janus: "keepalive",
-      session_id: this.signalSessionId,
-    });
-
-    this.keepAliveTimeout = setTimeout(() => this.sendKeepAliveMessage(), 30000);
+  onDataChannelMessage(message) {
+    console.log("data channel message:", message);
+    this.messageListener(message);
   }
 
   shouldStartConnectionTo(clientId) {
@@ -301,24 +337,24 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   enableMicrophone(enabled) {
-    this.notImplemented('enableMicrophone');
+    this.notImplemented("enableMicrophone");
   }
 
   sendData(clientId, dataType, data) {
-    this.rtcPeer.send({ clientId, dataType, data });
+    this.unreliableChannel.send(JSON.stringify({ clientId, dataType, data }));
   }
 
   sendDataGuaranteed(clientId, dataType, data) {
     // TODO: Add reliable datachannel support
-    this.rtcPeer.send({ clientId, dataType, data });
+    this.reliableChannel.send(JSON.stringify({ clientId, dataType, data }));
   }
 
   broadcastData(dataType, data) {
-    this.rtcPeer.send({ dataType, data });
+    this.unreliableChannel.send(JSON.stringify({ dataType, data }));
   }
 
   broadcastDataGuaranteed(dataType, data) {
-    this.rtcPeer.send({ dataType, data });
+    this.reliableChannel.send(JSON.stringify({ dataType, data }));
   }
 }
 
