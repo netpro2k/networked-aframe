@@ -1,6 +1,5 @@
 var SimplePeer = require("simple-peer");
 var INetworkAdapter = require("./INetworkAdapter");
-var WebRtcPeer = require("./WebRtcPeer");
 
 var charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -15,13 +14,18 @@ function randomString(len) {
   return str;
 }
 
+const MessageType = {
+  JOIN_ROOM: 0,
+  OCCUPANT: 1
+};
+
 class JanusAdapter extends INetworkAdapter {
   constructor() {
     super();
 
     this.app = "default";
     this.room = "default";
-    this.userId = randomString(12);
+    this.clientId = randomString(12);
 
     this.janusServer = null;
     this.janusServerUrl = null;
@@ -39,9 +43,9 @@ class JanusAdapter extends INetworkAdapter {
     this.onSignalError = this.onSignalError.bind(this);
     this.onSignalMessage = this.onSignalMessage.bind(this);
     this.sendKeepAliveMessage = this.sendKeepAliveMessage.bind(this);
-    this.onNegotiationNeeded = this.onNegotiationNeeded.bind(this);
     this.onDataChannelMessage = this.onDataChannelMessage.bind(this);
     this.onIceCandidate = this.onIceCandidate.bind(this);
+    this.onDataChannelOpen = this.onDataChannelOpen.bind(this);
   }
 
   setServerUrl(url) {
@@ -153,14 +157,26 @@ class JanusAdapter extends INetworkAdapter {
         },
         session_id: this.janusSessionId,
         handle_id: this.retproxyHandle,
-        jsep
+        jsep: offer
       },
       3000
     );
 
     await this.rtcPeer.setRemoteDescription(answer.jsep);
 
-    this.connectSuccess();
+    this.reliableChannel.addEventListener("open", this.onDataChannelOpen);
+  }
+
+  onDataChannelOpen() {
+    console.log("onDataChannelOpen");
+    var clientId = this.clientId;
+    this.reliableChannel.send(
+      JSON.stringify({
+        type: MessageType.JOIN_ROOM,
+        clientId
+      })
+    );
+    this.connectSuccess(clientId);
   }
 
   onIceCandidate(event) {
@@ -270,7 +286,7 @@ class JanusAdapter extends INetworkAdapter {
     var transaction = message.transaction;
 
     if (transaction && this.transactions[transaction]) {
-      this.transactions[transaction](new Error(message.error));
+      this.transactions[transaction](message.error);
 
       if (this.transactionTimeouts[transaction]) {
         clearTimeout(this.transactionTimeouts[transaction]);
@@ -299,12 +315,29 @@ class JanusAdapter extends INetworkAdapter {
 
   onSignalMessageWebRtcUp(message) {
     console.log("WebRTC Up!", message);
-    this.openListener();
   }
 
-  onDataChannelMessage(message) {
+  onDataChannelMessage(event) {
+    var message = JSON.parse(event.data);
     console.log("data channel message:", message);
-    this.messageListener(message);
+    //this.messageListener(message);
+
+    if (message.type === MessageType.JOIN_ROOM) {
+      this.connectSuccess(message.clientId);
+      this.reliableChannel.send(
+        JSON.stringify({
+          type: MessageType.OCCUPANT,
+          to: message.clientId,
+          clientId: this.clientId
+        })
+      );
+    } else if (message.type === MessageType.OCCUPANT) {
+      if (message.clientId === this.clientId) {
+        this.connectSuccess(message.clientId);
+      }
+    } else {
+      this.messageListener(message.clientId, message.dataType, message.data);
+    }
   }
 
   shouldStartConnectionTo(clientId) {

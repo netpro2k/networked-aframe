@@ -2,7 +2,7 @@ var WsEasyRtcAdapter = require("../adapters/WsEasyRtcAdapter");
 var EasyRtcAdapter = require("../adapters/EasyRtcAdapter");
 var UwsAdapter = require("../adapters/UwsAdapter");
 var FirebaseWebRtcAdapter = require("../adapters/FirebaseWebRtcAdapter");
-var JanusAdapter = require("../adapters/JanusHttpAdapter");
+var JanusAdapter = require("../adapters/JanusAdapter");
 
 class AdapterFactory {
   make(adapterName) {

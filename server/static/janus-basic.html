@@ -39,7 +39,7 @@
       room: dev;
       debug: true;
       adapter: janus;
-      serverURL: http://10.252.26.59:8088/janus;
+      serverURL: ws://10.252.26.59:8188/janus;
     ">
     <a-assets>
 
@@ -124,13 +124,13 @@
   </style>
 
   <script>
-      // On mobile remove elements that are resource heavy
-      var isMobile = AFRAME.utils.device.isMobile();
+    // On mobile remove elements that are resource heavy
+    var isMobile = AFRAME.utils.device.isMobile();
 
-      if (isMobile) {
-        var particles = document.getElementById('particles');
-        particles.parentNode.removeChild(particles);
-      }
+    if (isMobile) {
+      var particles = document.getElementById('particles');
+      particles.parentNode.removeChild(particles);
+    }
   </script>
 </body>
 
