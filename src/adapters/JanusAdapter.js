@@ -2,6 +2,63 @@ var SimplePeer = require("simple-peer");
 var INetworkAdapter = require("./INetworkAdapter");
 var { EventIterator } = require("event-iterator");
 
+var charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+const PEER_CONNECTION_CONFIG = {
+  iceServers: [
+    {
+      urls: "stun:stun.l.google.com:19302"
+    },
+    {
+      urls: "stun:global.stun.twilio.com:3478?transport=udp"
+    }
+  ]
+};
+
+function randomString(len) {
+  var str = "";
+
+  for (var i = 0; i < len; i++) {
+    var randomPoz = Math.floor(Math.random() * charSet.length);
+    str += charSet.substring(randomPoz, randomPoz + 1);
+  }
+
+  return str;
+}
+
+function sendSignal(ws, message) {
+  if (ws.readyState !== 1) {
+    throw new Error("Websocket not connected!");
+  }
+
+  message.transaction = randomString(12);
+  ws.send(JSON.stringify(message));
+  return message.transaction;
+}
+
+function sendIceCandidate(ws, sessionId, pluginHandle, candidate) {
+  sendSignal(ws, {
+    janus: "trickle",
+    session_id: sessionId,
+    handle_id: pluginHandle,
+    candidate: candidate || { completed: true }
+  });
+}
+
+async function signalTransaction(ws, messages, data) {
+  var transactionId = sendSignal(ws, data);
+
+  for await (let message of messages) {
+    if (message.transaction && message.transaction === transactionId) {
+      if (message.janus && message.janus === "success") {
+        return message;
+      } else {
+        throw new Error(message.error);
+      }
+    }
+  }
+}
+
 function makeWSMessageIterator(ws) {
   var messageListener;
   var closeListener;
@@ -34,48 +91,6 @@ function makeWSMessageIterator(ws) {
   return new EventIterator(listenHandler, removeHandler);
 }
 
-var charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-function randomString(len) {
-  var str = "";
-
-  for (var i = 0; i < len; i++) {
-    var randomPoz = Math.floor(Math.random() * charSet.length);
-    str += charSet.substring(randomPoz, randomPoz + 1);
-  }
-
-  return str;
-}
-
-function sendSignal(ws, message) {
-  if (ws.readyState !== 1) {
-    throw new Error("Websocket not connected!");
-  }
-
-  message.transaction = randomString(12);
-  ws.send(JSON.stringify(message));
-  return message.transaction;
-}
-
-async function signalTransaction(ws, messages, data) {
-  var transactionId = sendSignal(ws, data);
-
-  for await (let message of messages) {
-    if (message.transaction && message.transaction === transactionId) {
-      if (message.janus && message.janus === "success") {
-        return message;
-      } else {
-        throw new Error(message.error);
-      }
-    }
-  }
-}
-
-const MessageType = {
-  JOIN_ROOM: 0,
-  OCCUPANT: 1
-};
-
 class JanusAdapter extends INetworkAdapter {
   constructor() {
     super();
@@ -93,12 +108,12 @@ class JanusAdapter extends INetworkAdapter {
     this.unreliableChannel = null;
     this.reliableChannel = null;
 
-    this.connectedClients = [];
+    this.occupants = [];
+    this.occupantSubscribers = {};
+    this.occupantMediaStreams = {};
 
     this.sendKeepAliveMessage = this.sendKeepAliveMessage.bind(this);
     this.onDataChannelMessage = this.onDataChannelMessage.bind(this);
-    this.onIceCandidate = this.onIceCandidate.bind(this);
-    this.onDataChannelOpen = this.onDataChannelOpen.bind(this);
   }
 
   setServerUrl(url) {
@@ -163,18 +178,16 @@ class JanusAdapter extends INetworkAdapter {
     this.retproxyHandle = pluginResponse.data.id;
 
     // Create the RTCPeerConnection
-    this.rtcPeer = new RTCPeerConnection({
-      iceServers: [
-        {
-          urls: "stun:stun.l.google.com:19302"
-        },
-        {
-          urls: "stun:global.stun.twilio.com:3478?transport=udp"
-        }
-      ]
-    });
+    this.rtcPeer = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
 
-    this.rtcPeer.addEventListener("icecandidate", this.onIceCandidate);
+    this.rtcPeer.addEventListener("icecandidate", event =>
+      sendIceCandidate(
+        this.janusServer,
+        this.janusSessionId,
+        this.retproxyHandle,
+        event.candidate
+      )
+    );
 
     this.unreliableChannel = this.rtcPeer.createDataChannel("unreliable", {
       ordered: false,
@@ -191,6 +204,11 @@ class JanusAdapter extends INetworkAdapter {
     });
 
     this.reliableChannel.addEventListener("message", this.onDataChannelMessage);
+
+    var mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: true
+    });
+    this.rtcPeer.addStream(mediaStream);
 
     // Create, set, and send the WebRTC offer.
     var offer = await this.rtcPeer.createOffer();
@@ -224,7 +242,15 @@ class JanusAdapter extends INetworkAdapter {
         ) {
           // Set the local clientId and current occupants in the room.
           this.clientId = message.plugindata.data.user_id;
-          this.occupants = message.plugindata.data.user_ids;
+          this.occupants = message.plugindata.data.user_ids.filter(
+            id => id !== this.clientId
+          );
+
+          for (let occupantId of this.occupants) {
+            this.occupantMediaStreams[occupantId] = this.addSubscriber(
+              occupantId
+            );
+          }
         }
 
         // Continue when both messages have been processed.
@@ -255,6 +281,9 @@ class JanusAdapter extends INetworkAdapter {
             this.occupants.push(data.user_id);
             this.openListener(data.user_id);
             this.occupantListener(this.occupants);
+            this.occupantMediaStreams[data.user_id] = this.addSubscriber(
+              data.user_id
+            );
           }
         } else if (data.event === "leave") {
           var idx = this.occupants.indexOf(data.user_id);
@@ -269,15 +298,70 @@ class JanusAdapter extends INetworkAdapter {
     }
   }
 
-  onIceCandidate(event) {
-    var candidate = event.candidate || { completed: true };
+  async addSubscriber(occupantId) {
+    var messages = makeWSMessageIterator(this.janusServer);
 
-    sendSignal(this.janusServer, {
-      janus: "trickle",
+    // Attach Reticulum Janus plugin.
+    var pluginResponse = await signalTransaction(this.janusServer, messages, {
+      janus: "attach",
       session_id: this.janusSessionId,
-      handle_id: this.retproxyHandle,
-      candidate
+      plugin: "janus.plugin.retproxy",
+      "force-bundle": true,
+      "force-rtcp-mux": true
     });
+
+    var pluginHandle = pluginResponse.data.id;
+
+    var occupantPeer = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
+
+    this.occupantSubscribers[occupantId] = occupantPeer;
+
+    occupantPeer.addEventListener("icecandidate", event =>
+      sendIceCandidate(
+        this.janusServer,
+        this.janusSessionId,
+        pluginHandle,
+        event.candidate
+      )
+    );
+
+    var occupantOffer = await occupantPeer.createOffer({
+      offerToReceiveAudio: true
+    });
+    await occupantPeer.setLocalDescription(occupantOffer);
+
+    var subscriberTransactionId = sendSignal(this.janusServer, {
+      janus: "message",
+      body: {
+        kind: "join",
+        role: "subscriber",
+        user_id: this.clientId,
+        target_id: occupantId
+      },
+      session_id: this.janusSessionId,
+      handle_id: pluginHandle,
+      jsep: occupantOffer
+    });
+
+    for await (let message of messages) {
+      if (
+        message.transaction &&
+        message.transaction === subscriberTransactionId
+      ) {
+        // Set the remote description returned from Janus.
+        if (message.jsep) {
+          await occupantPeer.setRemoteDescription(message.jsep);
+
+          var streams = occupantPeer.getRemoteStreams();
+
+          if (streams.length > 0) {
+            return streams[0];
+          } else {
+            throw new Error("No media streams received.");
+          }
+        }
+      }
+    }
   }
 
   sendKeepAliveMessage() {
@@ -310,7 +394,7 @@ class JanusAdapter extends INetworkAdapter {
   closeStreamConnection(clientId) {}
 
   getConnectStatus(clientId) {
-    if (this.connectedClients.indexOf(clientId) === -1) {
+    if (this.occupants.indexOf(clientId) === -1) {
       return INetworkAdapter.NOT_CONNECTED;
     } else {
       return INetworkAdapter.IS_CONNECTED;
@@ -318,7 +402,7 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   getAudioStream(clientId) {
-    return Promise.reject("Interface method not implemented: getAudioStream");
+    return this.occupantMediaStreams[clientId];
   }
 
   enableMicrophone(enabled) {
