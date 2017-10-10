@@ -1,7 +1,8 @@
 {
   "name": "networked-aframe",
   "version": "0.3.0",
-  "description": "A web framework for building multi-user virtual reality experiences.",
+  "description":
+    "A web framework for building multi-user virtual reality experiences.",
   "homepage": "",
   "main": "dist/networked-aframe.js",
   "author": "Hayden Lee <haydenjameslee@gmail.com>",
@@ -13,10 +14,12 @@
     "build": "browserify src/index.js -o server/static/build.js",
     "easyrtc-install": "cd ./node_modules/easyrtc; npm install; cd ../../;",
     "dev": "webpack-dev-server --content-base ./server/static/",
-    "dist": "webpack --config webpack.config.js && webpack -p --config webpack.prod.config.js",
+    "dist":
+      "webpack --config webpack.config.js && webpack --define process.env.NODE_ENV=\"production\" --config webpack.prod.config.js",
     "lint": "semistandard -v | snazzy",
     "prepublish": "npm run dist",
-    "preghpages": "npm run build && shx rm -rf gh-pages && shx mkdir gh-pages && shx cp -r examples/* gh-pages",
+    "preghpages":
+      "npm run build && shx rm -rf gh-pages && shx mkdir gh-pages && shx cp -r examples/* gh-pages",
     "ghpages": "npm run preghpages && ghpages -p gh-pages",
     "start": "node ./server/easyrtc-server.js",
     "start:uws": "node ./server/uws-server.js",
@@ -97,8 +100,6 @@
     "npm": "^4.0.5"
   },
   "babel": {
-    "presets": [
-      "es2015"
-    ]
+    "presets": ["es2015"]
   }
 }
