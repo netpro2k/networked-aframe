@@ -2,7 +2,7 @@ var SimplePeer = require("simple-peer");
 var INetworkAdapter = require("./INetworkAdapter");
 var { EventIterator } = require("event-iterator");
 
-function makeWebsocketIterator(ws) {
+function makeWSMessageIterator(ws) {
   var messageListener;
   var closeListener;
   var errorListener;
@@ -142,7 +142,7 @@ class JanusAdapter extends INetworkAdapter {
     // TODO: only send keep alive messages after 30 seconds of inactivity.
     this.sendKeepAliveMessage();
 
-    var messages = makeWebsocketIterator(this.janusServer);
+    var messages = makeWSMessageIterator(this.janusServer);
 
     // Create Janus session
     var sessionResponse = await signalTransaction(this.janusServer, messages, {
@@ -213,7 +213,7 @@ class JanusAdapter extends INetworkAdapter {
         message.transaction &&
         message.transaction === publisherTransactionId
       ) {
-        // Set the
+        // Set the remote description returned from Janus.
         if (message.jsep) {
           await this.rtcPeer.setRemoteDescription(message.jsep);
         } else if (
@@ -222,20 +222,22 @@ class JanusAdapter extends INetworkAdapter {
           message.plugindata.data.event &&
           message.plugindata.data.event === "join_self"
         ) {
+          // Set the local clientId and current occupants in the room.
           this.clientId = message.plugindata.data.user_id;
           this.occupants = message.plugindata.data.user_ids;
-
-          // Call connectSuccess when the reliable datachannel opens.
-          this.reliableChannel.addEventListener("open", _ =>
-            this.connectSuccess(this.clientId)
-          );
         }
 
+        // Continue when both messages have been processed.
         if (this.rtcPeer.remoteDescription && this.clientId) {
           break;
         }
       }
     }
+
+    // Call connectSuccess when the reliable datachannel opens.
+    this.reliableChannel.addEventListener("open", _ =>
+      this.connectSuccess(this.clientId)
+    );
 
     // Handle leave and join events
     for await (let message of messages) {
