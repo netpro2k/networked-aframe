@@ -59,6 +59,24 @@ async function signalTransaction(ws, messages, data) {
   }
 }
 
+function waitForEvent(obj, event) {
+  var resolveCallback;
+
+  var promise = new Promise(resolve => {
+    resolveCallback = resolve;
+  });
+
+  obj.addEventListener(event, e => resolveCallback(e), { once: true });
+
+  return promise;
+}
+
+function wait(ms) {
+  return new Promise(resolve => {
+    setTimeout(_ => resolve(), ms);
+  });
+}
+
 function makeWSMessageIterator(ws) {
   var messageListener;
   var closeListener;
@@ -108,7 +126,7 @@ class JanusAdapter extends INetworkAdapter {
     this.unreliableChannel = null;
     this.reliableChannel = null;
 
-    this.occupants = [];
+    this.occupants = {};
     this.occupantSubscribers = {};
     this.occupantMediaStreams = {};
 
@@ -153,10 +171,6 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   async setupRTCPeerConnection() {
-    // Send keep alive messages now and then every 30 seconds.
-    // TODO: only send keep alive messages after 30 seconds of inactivity.
-    this.sendKeepAliveMessage();
-
     var messages = makeWSMessageIterator(this.janusServer);
 
     // Create Janus session
@@ -165,6 +179,10 @@ class JanusAdapter extends INetworkAdapter {
     });
 
     this.janusSessionId = sessionResponse.data.id;
+
+    // Send keep alive messages now and then every 30 seconds.
+    // TODO: only send keep alive messages after 30 seconds of inactivity.
+    this.sendKeepAliveMessage();
 
     // Attach Reticulum Janus plugin.
     var pluginResponse = await signalTransaction(this.janusServer, messages, {
@@ -242,14 +260,12 @@ class JanusAdapter extends INetworkAdapter {
         ) {
           // Set the local clientId and current occupants in the room.
           this.clientId = message.plugindata.data.user_id;
-          this.occupants = message.plugindata.data.user_ids.filter(
-            id => id !== this.clientId
-          );
 
-          for (let occupantId of this.occupants) {
-            this.occupantMediaStreams[occupantId] = this.addSubscriber(
-              occupantId
-            );
+          var occupantIds = message.plugindata.data.user_ids;
+          for (occupantId of occupantIds) {
+            if (occupantId !== this.clientId) {
+              this.occupants[occupantId] = true;
+            }
           }
         }
 
@@ -260,10 +276,20 @@ class JanusAdapter extends INetworkAdapter {
       }
     }
 
-    // Call connectSuccess when the reliable datachannel opens.
-    this.reliableChannel.addEventListener("open", _ =>
-      this.connectSuccess(this.clientId)
-    );
+    // Wait for the reliable channel to open before continuing.
+    await waitForEvent(this.reliableChannel, "open");
+
+    this.connectSuccess(this.clientId);
+
+    for (var occupantId in this.occupants) {
+      if (this.occupants.hasOwnProperty(occupantId)) {
+        this.occupantMediaStreams[occupantId] = this.addSubscriber(occupantId);
+        this.openListener(occupantId);
+        console.log("setAudioStream", occupantId);
+      }
+    }
+
+    this.occupantListener(this.occupants);
 
     // Handle leave and join events
     for await (let message of messages) {
@@ -275,21 +301,19 @@ class JanusAdapter extends INetworkAdapter {
         var data = message.plugindata.data;
 
         if (data.event === "join_other") {
-          var idx = this.occupants.indexOf(data.user_id);
-
-          if (idx === -1) {
-            this.occupants.push(data.user_id);
-            this.openListener(data.user_id);
-            this.occupantListener(this.occupants);
+          if (!this.occupants[data.user_id]) {
+            await wait(1000); // TODO: Actually fix this race condition.
+            this.occupants[data.user_id] = true;
             this.occupantMediaStreams[data.user_id] = this.addSubscriber(
               data.user_id
             );
+            console.log("setAudioStream", data.user_id);
+            this.occupantListener(this.occupants);
+            this.openListener(data.user_id);
           }
         } else if (data.event === "leave") {
-          var idx = this.occupants.indexOf(data.user_id);
-
-          if (idx !== -1) {
-            this.occupants.splice(idx, 1);
+          if (this.occupants[data.user_id]) {
+            delete this.occupants[data.user_id];
             this.closedListener(data.user_id);
             this.occupantListener(this.occupants);
           }
@@ -355,6 +379,7 @@ class JanusAdapter extends INetworkAdapter {
           var streams = occupantPeer.getRemoteStreams();
 
           if (streams.length > 0) {
+            console.log(streams[0]);
             return streams[0];
           } else {
             throw new Error("No media streams received.");
@@ -378,7 +403,7 @@ class JanusAdapter extends INetworkAdapter {
 
   onDataChannelMessage(event) {
     var message = JSON.parse(event.data);
-    //console.log("data channel message:", message);
+    console.log("Received message:", message.transaction, message);
 
     if (message.dataType) {
       this.messageListener(null, message.dataType, message.data);
@@ -394,15 +419,19 @@ class JanusAdapter extends INetworkAdapter {
   closeStreamConnection(clientId) {}
 
   getConnectStatus(clientId) {
-    if (this.occupants.indexOf(clientId) === -1) {
-      return INetworkAdapter.NOT_CONNECTED;
-    } else {
+    if (this.occupants[clientId]) {
       return INetworkAdapter.IS_CONNECTED;
+    } else {
+      return INetworkAdapter.NOT_CONNECTED;
     }
   }
 
   getAudioStream(clientId) {
-    return this.occupantMediaStreams[clientId];
+    console.log("getAudioStream", clientId);
+
+    return (
+      this.occupantMediaStreams[clientId] || Promise.reject("No audio stream.")
+    );
   }
 
   enableMicrophone(enabled) {
@@ -411,25 +440,25 @@ class JanusAdapter extends INetworkAdapter {
 
   sendData(clientId, dataType, data) {
     var message = { clientId, dataType, data };
-    //console.log("sendData", message);
+    // console.log("sendData", message);
     this.unreliableChannel.send(JSON.stringify(message));
   }
 
   sendDataGuaranteed(clientId, dataType, data) {
     var message = { clientId, dataType, data };
-    //console.log("sendDataGuaranteed", message);
+    // console.log("sendDataGuaranteed", message);
     this.reliableChannel.send(JSON.stringify(message));
   }
 
   broadcastData(dataType, data) {
     var message = { dataType, data };
-    //console.log("broadcastData", message);
+    // console.log("broadcastData", message);
     this.unreliableChannel.send(JSON.stringify(message));
   }
 
   broadcastDataGuaranteed(dataType, data) {
-    var message = { dataType, data };
-    //console.log("broadcastDataGuaranteed", message);
+    var message = { dataType, data, transaction: randomString(3) };
+    // console.log("broadcastDataGuaranteed:", message.transaction, message);
     this.reliableChannel.send(JSON.stringify(message));
   }
 }
