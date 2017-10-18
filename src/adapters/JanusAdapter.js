@@ -6,7 +6,6 @@ const ContentKind = {
   Data: 4
 };
 
-/* DEBUG */
 const ContentKindNames = {
   1: "Audio",
   2: "Video",
@@ -517,7 +516,7 @@ class JanusAdapter extends INetworkAdapter {
 
   onDataChannelMessage(event) {
     var message = JSON.parse(event.data);
-    console.log("Received message:", message.transaction, message);
+    // console.log("Received message:", message.transaction, message);
 
     if (message.dataType) {
       this.onOccupantMessage(null, message.dataType, message.data);
@@ -553,21 +552,21 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   sendData(clientId, dataType, data) {
-    console.log("sendData", data);
+    // console.log("sendData", data);
     this.publisher.unreliableChannel.send(
       JSON.stringify({ clientId, dataType, data })
     );
   }
 
   sendDataGuaranteed(clientId, dataType, data) {
-    console.log("sendDataGuaranteed", data);
+    // console.log("sendDataGuaranteed", data);
     this.publisher.reliableChannel.send(
       JSON.stringify({ clientId, dataType, data })
     );
   }
 
   broadcastData(dataType, data) {
-    console.log("broadcastData", data);
+    // console.log("broadcastData", data);
     this.publisher.unreliableChannel.send(JSON.stringify({ dataType, data }));
   }
 
