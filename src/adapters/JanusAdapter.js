@@ -1,8 +1,36 @@
-var SimplePeer = require("simple-peer");
 var INetworkAdapter = require("./INetworkAdapter");
-var { EventIterator } = require("event-iterator");
+
+const ContentKind = {
+  Audio: 1,
+  Video: 2,
+  Data: 4
+};
+
+/* DEBUG */
+const ContentKindNames = {
+  1: "Audio",
+  2: "Video",
+  4: "Data"
+};
 
 var charSet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+
+function randomString(len) {
+  var str = "";
+
+  for (var i = 0; i < len; i++) {
+    var pos = Math.floor(Math.random() * charSet.length);
+    str += charSet.substring(pos, pos + 1);
+  }
+
+  return str;
+}
+
+function waitForEvent(target, event) {
+  return new Promise((resolve, reject) => {
+    target.addEventListener(event, e => resolve(e), { once: true });
+  });
+}
 
 const PEER_CONNECTION_CONFIG = {
   iceServers: [
@@ -15,127 +43,25 @@ const PEER_CONNECTION_CONFIG = {
   ]
 };
 
-function randomString(len) {
-  var str = "";
-
-  for (var i = 0; i < len; i++) {
-    var randomPoz = Math.floor(Math.random() * charSet.length);
-    str += charSet.substring(randomPoz, randomPoz + 1);
-  }
-
-  return str;
-}
-
-function sendSignal(ws, message) {
-  if (ws.readyState !== 1) {
-    throw new Error("Websocket not connected!");
-  }
-
-  message.transaction = randomString(12);
-  ws.send(JSON.stringify(message));
-  return message.transaction;
-}
-
-function sendIceCandidate(ws, sessionId, pluginHandle, candidate) {
-  sendSignal(ws, {
-    janus: "trickle",
-    session_id: sessionId,
-    handle_id: pluginHandle,
-    candidate: candidate || { completed: true }
-  });
-}
-
-async function signalTransaction(ws, messages, data) {
-  var transactionId = sendSignal(ws, data);
-
-  for await (let message of messages) {
-    if (message.transaction && message.transaction === transactionId) {
-      if (message.janus && message.janus === "success") {
-        return message;
-      } else {
-        throw new Error(message.error);
-      }
-    }
-  }
-}
-
-function waitForEvent(obj, event) {
-  var resolveCallback;
-
-  var promise = new Promise(resolve => {
-    resolveCallback = resolve;
-  });
-
-  obj.addEventListener(event, e => resolveCallback(e), { once: true });
-
-  return promise;
-}
-
-function wait(ms) {
-  return new Promise(resolve => {
-    setTimeout(_ => resolve(), ms);
-  });
-}
-
-function makeWSMessageIterator(ws) {
-  var messageListener;
-  var closeListener;
-  var errorListener;
-
-  var listenHandler = function(push, stop, fail) {
-    messageListener = event => {
-      push(JSON.parse(event.data));
-    };
-
-    closeListener = event => {
-      stop();
-    };
-
-    errorListener = event => {
-      fail(event.error);
-    };
-
-    ws.addEventListener("message", messageListener);
-    ws.addEventListener("close", closeListener);
-    ws.addEventListener("error", errorListener);
-  };
-
-  var removeHandler = function(push, stop, fail) {
-    ws.removeEventListener("message", messageListener);
-    ws.removeEventListener("close", closeListener);
-    ws.removeEventListener("error", errorListener);
-  };
-
-  return new EventIterator(listenHandler, removeHandler);
-}
-
 class JanusAdapter extends INetworkAdapter {
   constructor() {
     super();
 
     this.app = "default";
-    this.room = "default";
-    this.clientId = null;
+    this.room = 1;
+    this.serverUrl = null;
 
-    this.janusServer = null;
-    this.janusServerUrl = null;
-    this.janusSessionId = null;
-    this.retproxyHandle = null;
-
-    this.rtcPeer = null;
-    this.unreliableChannel = null;
-    this.reliableChannel = null;
+    this.ws = null;
+    this.messageHandlers = [];
+    this.onWebsocketMessage = this.onWebsocketMessage.bind(this);
 
     this.occupants = {};
-    this.occupantSubscribers = {};
     this.occupantMediaStreams = {};
-
-    this.sendKeepAliveMessage = this.sendKeepAliveMessage.bind(this);
     this.onDataChannelMessage = this.onDataChannelMessage.bind(this);
   }
 
   setServerUrl(url) {
-    this.janusServerUrl = url;
+    this.serverUrl = url;
   }
 
   setApp(app) {
@@ -143,7 +69,7 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   setRoom(roomName) {
-    this.room = roomName;
+    // this.room = roomName;
   }
 
   setWebRtcOptions(options) {}
@@ -154,251 +80,439 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   setRoomOccupantListener(occupantListener) {
-    this.occupantListener = occupantListener;
+    this.onOccupantsChanged = occupantListener;
   }
 
   setDataChannelListeners(openListener, closedListener, messageListener) {
-    this.openListener = openListener;
-    this.closedListener = closedListener;
-    this.messageListener = messageListener;
+    this.onOccupantConnected = openListener;
+    this.onOccupantDisconnected = closedListener;
+    this.onOccupantMessage = messageListener;
   }
 
   connect() {
-    this.janusServer = new WebSocket(this.janusServerUrl, "janus-protocol");
-    this.janusServer.addEventListener("open", () =>
-      this.setupRTCPeerConnection()
-    );
+    this.ws = new WebSocket(this.serverUrl, "janus-protocol");
+    this.ws.addEventListener("open", _ => this.onWebsocketOpen());
+    this.ws.addEventListener("message", this.onWebsocketMessage);
   }
 
-  async setupRTCPeerConnection() {
-    var messages = makeWSMessageIterator(this.janusServer);
+  async onWebsocketOpen() {
+    // Create the Janus Session
+    this.sessionId = await this.sendCreateSession();
 
-    // Create Janus session
-    var sessionResponse = await signalTransaction(this.janusServer, messages, {
-      janus: "create"
-    });
+    // Attach the SFU Plugin and create a RTCPeerConnection for the publisher.
+    // The publisher sends audio and opens two bidirectional data channels.
+    // One reliable datachannel and one unreliable.
+    var publisher = await this.createPublisher();
+    this.publisher = publisher;
 
-    this.janusSessionId = sessionResponse.data.id;
-
-    // Send keep alive messages now and then every 30 seconds.
-    // TODO: only send keep alive messages after 30 seconds of inactivity.
-    this.sendKeepAliveMessage();
-
-    // Attach Reticulum Janus plugin.
-    var pluginResponse = await signalTransaction(this.janusServer, messages, {
-      janus: "attach",
-      session_id: this.janusSessionId,
-      plugin: "janus.plugin.retproxy",
-      "force-bundle": true,
-      "force-rtcp-mux": true
-    });
-
-    this.retproxyHandle = pluginResponse.data.id;
-
-    // Create the RTCPeerConnection
-    this.rtcPeer = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
-
-    this.rtcPeer.addEventListener("icecandidate", event =>
-      sendIceCandidate(
-        this.janusServer,
-        this.janusSessionId,
-        this.retproxyHandle,
-        event.candidate
-      )
+    // Start listening for join and leave events from the publisher.
+    // Queue these events so we can handle them as soon as the reliable datachannel is open.
+    var publisherEvents = this.messageIterator(
+      msg =>
+        msg.janus &&
+        msg.janus === "event" &&
+        msg.sender &&
+        msg.sender === publisher.handleId
     );
 
-    this.unreliableChannel = this.rtcPeer.createDataChannel("unreliable", {
+    // Wait for the reliable datachannel to be open before we start sending messages on it.
+    await waitForEvent(publisher.reliableChannel, "open");
+    // DEBUG
+    console.log("Reliable datachannel opened");
+
+    this.userId = publisher.userId;
+    this.connectSuccess(publisher.userId);
+
+    // Add all of the initial occupants.
+    for (let occupantId of publisher.initialOccupants) {
+      if (occupantId !== publisher.userId) {
+        // DEBUG
+        console.log("add initial occupant", { userId: occupantId });
+        this.addOccupant(publisher.handleId, occupantId);
+      }
+    }
+
+    // Handle all of the join and leave events from the publisher.
+    for await (let message of publisherEvents) {
+      var data = message.plugindata.data;
+
+      if (data.event && data.event === "join") {
+        // DEBUG
+        console.log("onJoin", { userId: data.user_id });
+        this.addOccupant(publisher.handleId, data.user_id);
+      } else if (data.event && data.event === "leave") {
+        // DEBUG
+        console.log("onLeave", { userId: data.user_id });
+        this.removeOccupant(data.user_id);
+      }
+    }
+  }
+
+  async addOccupant(publisherHandle, occupantId) {
+    var subscriber = await this.createSubscriber(publisherHandle, occupantId);
+    this.occupantMediaStreams[occupantId] = subscriber.mediaStream;
+    // Call the Networked AFrame callbacks for the new occupant.
+    this.onOccupantConnected(occupantId);
+    this.occupants[occupantId] = true;
+    this.onOccupantsChanged(this.occupants);
+  }
+
+  removeOccupant(occupantId) {
+    if (this.occupants[occupantId]) {
+      delete this.occupants[occupantId];
+      // Call the Networked AFrame callbacks for the removed occupant.
+      this.onOccupantDisconnected(occupantId);
+      this.onOccupantsChanged(this.occupants);
+    }
+  }
+
+  async createPublisher() {
+    var handleId = await this.sendAttachSFUPlugin();
+
+    var peerConnection = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
+
+    peerConnection.addEventListener("icecandidate", event =>
+      this.sendIceCandidate(handleId, event.candidate)
+    );
+
+    // Create an unreliable datachannel for sending and receiving component updates, etc.
+    var unreliableChannel = peerConnection.createDataChannel("unreliable", {
       ordered: false,
       maxRetransmits: 0
     });
 
-    this.unreliableChannel.addEventListener(
-      "message",
-      this.onDataChannelMessage
-    );
-
-    this.reliableChannel = this.rtcPeer.createDataChannel("reliable", {
+    // Create a reliable datachannel for sending and recieving entity instantiations, etc.
+    var reliableChannel = peerConnection.createDataChannel("reliable", {
       ordered: true
     });
 
-    this.reliableChannel.addEventListener("message", this.onDataChannelMessage);
+    unreliableChannel.addEventListener("message", this.onDataChannelMessage);
 
+    reliableChannel.addEventListener("message", this.onDataChannelMessage);
+
+    // Add your microphone's stream to the PeerConnection.
     var mediaStream = await navigator.mediaDevices.getUserMedia({
       audio: true
     });
-    this.rtcPeer.addStream(mediaStream);
 
-    // Create, set, and send the WebRTC offer.
-    var offer = await this.rtcPeer.createOffer();
-    await this.rtcPeer.setLocalDescription(offer);
+    peerConnection.addStream(mediaStream);
 
-    var publisherTransactionId = sendSignal(this.janusServer, {
-      janus: "message",
-      body: {
-        kind: "join",
-        role: "publisher"
-      },
-      session_id: this.janusSessionId,
-      handle_id: this.retproxyHandle,
-      jsep: offer
-    });
+    var offer = await peerConnection.createOffer();
+    await peerConnection.setLocalDescription(offer);
 
-    // Wait for multiple responses from the server
-    for await (let message of messages) {
-      if (
-        message.transaction &&
-        message.transaction === publisherTransactionId
-      ) {
-        // Set the remote description returned from Janus.
-        if (message.jsep) {
-          await this.rtcPeer.setRemoteDescription(message.jsep);
-        } else if (
-          message.plugindata &&
-          message.plugindata.data &&
-          message.plugindata.data.event &&
-          message.plugindata.data.event === "join_self"
-        ) {
-          // Set the local clientId and current occupants in the room.
-          this.clientId = message.plugindata.data.user_id;
+    var userId;
+    var initialOccupants = [];
 
-          var occupantIds = message.plugindata.data.user_ids;
-          for (occupantId of occupantIds) {
-            if (occupantId !== this.clientId) {
-              this.occupants[occupantId] = true;
-            }
-          }
-        }
-
-        // Continue when both messages have been processed.
-        if (this.rtcPeer.remoteDescription && this.clientId) {
-          break;
-        }
-      }
-    }
-
-    // Wait for the reliable channel to open before continuing.
-    await waitForEvent(this.reliableChannel, "open");
-
-    this.connectSuccess(this.clientId);
-
-    for (var occupantId in this.occupants) {
-      if (this.occupants.hasOwnProperty(occupantId)) {
-        this.occupantMediaStreams[occupantId] = this.addSubscriber(occupantId);
-        this.openListener(occupantId);
-        console.log("setAudioStream", occupantId);
-      }
-    }
-
-    this.occupantListener(this.occupants);
-
-    // Handle leave and join events
-    for await (let message of messages) {
-      if (
+    // Handle each event associated with the publisher.
+    for await (let message of this.sendJoin(handleId, offer)) {
+      if (message.jsep) {
+        // DEBUG
+        console.log("createPublisher received: jsep");
+        await peerConnection.setRemoteDescription(message.jsep);
+      } else if (
+        // TODO: Can we flatten this data structure?
+        // TODO: Can we use an initial event type?
         message.plugindata &&
         message.plugindata.data &&
-        message.sender === this.retproxyHandle
+        message.plugindata.data.response
       ) {
-        var data = message.plugindata.data;
+        var response = message.plugindata.data.response;
+        // DEBUG
+        console.log("createPublisher received:", response);
+        userId = response.user_id;
+        initialOccupants = response.user_ids;
+      }
 
-        if (data.event === "join_other") {
-          if (!this.occupants[data.user_id]) {
-            await wait(1000); // TODO: Actually fix this race condition.
-            this.occupants[data.user_id] = true;
-            this.occupantMediaStreams[data.user_id] = this.addSubscriber(
-              data.user_id
-            );
-            console.log("setAudioStream", data.user_id);
-            this.occupantListener(this.occupants);
-            this.openListener(data.user_id);
-          }
-        } else if (data.event === "leave") {
-          if (this.occupants[data.user_id]) {
-            delete this.occupants[data.user_id];
-            this.closedListener(data.user_id);
-            this.occupantListener(this.occupants);
-          }
-        }
+      if (peerConnection.remoteDescription && userId) {
+        break;
       }
     }
+
+    return {
+      handleId,
+      userId,
+      initialOccupants,
+      reliableChannel,
+      unreliableChannel,
+      mediaStream,
+      peerConnection
+    };
   }
 
-  async addSubscriber(occupantId) {
-    var messages = makeWSMessageIterator(this.janusServer);
+  async createSubscriber(publisherHandle, occupantId) {
+    // Start receiving data for this occupant on the publicher peer connection.
+    await this.subscribeTo(publisherHandle, occupantId, ContentKind.Data);
 
-    // Attach Reticulum Janus plugin.
-    var pluginResponse = await signalTransaction(this.janusServer, messages, {
+    var handleId = await this.sendAttachSFUPlugin();
+
+    var peerConnection = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
+
+    peerConnection.addEventListener("icecandidate", event =>
+      this.sendIceCandidate(handleId, event.candidate)
+    );
+
+    var offer = await peerConnection.createOffer({
+      offerToReceiveAudio: true
+    });
+
+    await peerConnection.setLocalDescription(offer);
+
+    for await (let response of this.sendJoin(handleId, offer)) {
+      if (response.jsep) {
+        // DEBUG
+        console.log("createSubscriber received: jsep");
+        await peerConnection.setRemoteDescription(response.jsep);
+        break;
+      }
+    }
+
+    // Get the occupant's audio stream.
+    var streams = peerConnection.getRemoteStreams();
+    var mediaStream = streams.length > 0 ? streams[0] : null;
+
+    // Start receiving audio for this occupant on this peer connection.
+    await this.subscribeTo(handleId, occupantId, ContentKind.Audio);
+
+    return {
+      handleId,
+      mediaStream,
+      peerConnection
+    };
+  }
+
+  async sendCreateSession() {
+    // DEBUG
+    console.log("sendCreateSession");
+    var response = await this.transactionPromise({ janus: "create" });
+    return response.data.id;
+  }
+
+  async sendAttachSFUPlugin() {
+    // DEBUG
+    console.log("sendAttachSFUPlugin");
+
+    var response = await this.transactionPromise({
       janus: "attach",
-      session_id: this.janusSessionId,
-      plugin: "janus.plugin.retproxy",
+      session_id: this.sessionId,
+      plugin: "janus.plugin.sfu",
       "force-bundle": true,
       "force-rtcp-mux": true
     });
 
-    var pluginHandle = pluginResponse.data.id;
+    return response.data.id;
+  }
 
-    var occupantPeer = new RTCPeerConnection(PEER_CONNECTION_CONFIG);
-
-    this.occupantSubscribers[occupantId] = occupantPeer;
-
-    occupantPeer.addEventListener("icecandidate", event =>
-      sendIceCandidate(
-        this.janusServer,
-        this.janusSessionId,
-        pluginHandle,
-        event.candidate
-      )
-    );
-
-    var occupantOffer = await occupantPeer.createOffer({
-      offerToReceiveAudio: true
+  sendJoin(handleId, offer) {
+    // DEBUG
+    console.log("sendJoin", {
+      handleId,
+      userId: this.userId,
+      roomId: this.room
     });
-    await occupantPeer.setLocalDescription(occupantOffer);
 
-    var subscriberTransactionId = sendSignal(this.janusServer, {
+    var signal = {
       janus: "message",
       body: {
         kind: "join",
-        role: "subscriber",
-        user_id: this.clientId,
-        target_id: occupantId
+        room_id: this.room
       },
-      session_id: this.janusSessionId,
-      handle_id: pluginHandle,
-      jsep: occupantOffer
+      session_id: this.sessionId,
+      handle_id: handleId,
+      jsep: offer
+    };
+
+    if (this.userId) {
+      signal.body.user_id = this.userId;
+    }
+
+    return this.transactionIterator(signal);
+  }
+
+  sendIceCandidate(handleId, candidate) {
+    return this.sendSignal({
+      janus: "trickle",
+      session_id: this.sessionId,
+      handle_id: handleId,
+      candidate: candidate || { completed: true }
     });
+  }
 
-    for await (let message of messages) {
-      if (
-        message.transaction &&
-        message.transaction === subscriberTransactionId
-      ) {
-        // Set the remote description returned from Janus.
-        if (message.jsep) {
-          await occupantPeer.setRemoteDescription(message.jsep);
+  sendKeepAliveMessage() {
+    // Send a keepalive message to keep the WebRTC connections from closing.
+    return this.sendSignal({
+      janus: "keepalive",
+      session_id: this.sessionId
+    });
+  }
 
-          var streams = occupantPeer.getRemoteStreams();
+  async sendSubscribe(handleId, specs) {
+    var signal = {
+      janus: "message",
+      body: {
+        kind: "subscribe",
+        specs
+      },
+      session_id: this.sessionId,
+      handle_id: handleId
+    };
 
-          if (streams.length > 0) {
-            console.log(streams[0]);
-            return streams[0];
-          } else {
-            throw new Error("No media streams received.");
-          }
+    for await (let message of this.transactionIterator(signal)) {
+      if (message.janus === "event") {
+        var success = message.plugindata.data.success;
+        if (success) {
+          return message;
+        } else {
+          throw new Error(message);
         }
       }
     }
   }
 
-  sendKeepAliveMessage() {
-    sendSignal(this.janusServer, {
-      janus: "keepalive",
-      session_id: this.janusSessionId
+  subscribeTo(handleId, userId, contentKind) {
+    // DEBUG
+    console.log("subscribeTo", {
+      userId,
+      contentKind: ContentKindNames[contentKind]
+    });
+    return this.sendSubscribe(handleId, [
+      {
+        publisher_id: userId,
+        content_kind: contentKind
+      }
+    ]);
+  }
+
+  subscribeToAll(handleId, userIds, contentKind) {
+    // DEBUG
+    console.log("subscribeToAll", {
+      userIds,
+      contentKind: ContentKindNames[contentKind]
     });
 
+    var specs = userIds.map(userId => ({
+      publisher_id: userId,
+      content_kind: contentKind
+    }));
+
+    return this.sendSubscribe(handleId, specs);
+  }
+
+  transactionPromise(message) {
+    var transactionId = this.sendSignal(message);
+    return this.messagePromise(
+      message => message.transaction && message.transaction === transactionId
+    );
+  }
+
+  transactionIterator(message) {
+    var transactionId = this.sendSignal(message);
+    return this.messageIterator(
+      message => message.transaction && message.transaction === transactionId
+    );
+  }
+
+  // Attach a random transaction id to the message and send.
+  sendSignal(message) {
+    var transactionId = randomString(12);
+    message.transaction = transactionId;
+    //console.log("Websocket Sent:", message);
+    this.ws.send(JSON.stringify(message));
+    clearTimeout(this.keepAliveTimeout);
     this.keepAliveTimeout = setTimeout(
       () => this.sendKeepAliveMessage(),
       30000
     );
+    return transactionId;
+  }
+
+  messagePromise(filter) {
+    return new Promise((resolve, reject) => {
+      this.messageHandlers.push({
+        type: "promise",
+        filter,
+        resolve,
+        reject
+      });
+    });
+  }
+
+  messageIterator(filter) {
+    var self = this;
+
+    var messageHandler = {
+      type: "iterator",
+      filter,
+      messages: [],
+      error: null,
+      resolve: null,
+      reject: null
+    };
+
+    this.messageHandlers.push(messageHandler);
+
+    var iterator = {
+      next() {
+        // Handle any error responses.
+        if (messageHandler.error) {
+          return Promise.reject(messageHandler.error);
+        }
+
+        // If the handler already has messages queued, use those.
+        if (messageHandler.messages.length > 0) {
+          return Promise.resolve({
+            value: messageHandler.messages.shift()
+          });
+        }
+
+        // Otherwise add a new promise to the handler so we can wait for the next message.
+        return new Promise((resolve, reject) => {
+          messageHandler.resolve = resolve;
+          messageHandler.reject = reject;
+        });
+      },
+      return() {
+        var idx = self.messageHandlers.indexOf(messageHandler);
+        self.messageHandlers.splice(idx, 1);
+        return Promise.resolve({ done: true });
+      },
+      [Symbol.asyncIterator]() {
+        return iterator;
+      }
+    };
+
+    return iterator;
+  }
+
+  // Process all incoming websocket messages. Resolve, queue, and handle errors.
+  onWebsocketMessage(event) {
+    var message = JSON.parse(event.data);
+    //console.log("Websocket Received:", message);
+
+    for (var handler of this.messageHandlers) {
+      if (handler.filter(message)) {
+        if (handler.type === "promise") {
+          if (message.janus === "success") {
+            handler.resolve(message);
+          } else {
+            handler.reject(message);
+          }
+        } else if (handler.type === "iterator") {
+          if (message.error) {
+            if (handler.reject) {
+              handler.reject(message);
+            } else {
+              handler.error = message;
+            }
+          } else {
+            if (handler.resolve) {
+              handler.resolve({ value: message });
+            } else {
+              handler.messages.push(message);
+            }
+          }
+        }
+      }
+    }
   }
 
   onDataChannelMessage(event) {
@@ -406,7 +520,7 @@ class JanusAdapter extends INetworkAdapter {
     console.log("Received message:", message.transaction, message);
 
     if (message.dataType) {
-      this.messageListener(null, message.dataType, message.data);
+      this.onOccupantMessage(null, message.dataType, message.data);
     }
   }
 
@@ -427,10 +541,10 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   getAudioStream(clientId) {
-    console.log("getAudioStream", clientId);
-
+    console.log("getAudioStream", clientId, this.occupantMediaStreams);
     return (
-      this.occupantMediaStreams[clientId] || Promise.reject("No audio stream.")
+      Promise.resolve(this.occupantMediaStreams[clientId]) ||
+      Promise.reject(`No media stream for client: ${clientId}`)
     );
   }
 
@@ -439,27 +553,27 @@ class JanusAdapter extends INetworkAdapter {
   }
 
   sendData(clientId, dataType, data) {
-    var message = { clientId, dataType, data };
-    // console.log("sendData", message);
-    this.unreliableChannel.send(JSON.stringify(message));
+    console.log("sendData", data);
+    this.publisher.unreliableChannel.send(
+      JSON.stringify({ clientId, dataType, data })
+    );
   }
 
   sendDataGuaranteed(clientId, dataType, data) {
-    var message = { clientId, dataType, data };
-    // console.log("sendDataGuaranteed", message);
-    this.reliableChannel.send(JSON.stringify(message));
+    console.log("sendDataGuaranteed", data);
+    this.publisher.reliableChannel.send(
+      JSON.stringify({ clientId, dataType, data })
+    );
   }
 
   broadcastData(dataType, data) {
-    var message = { dataType, data };
-    // console.log("broadcastData", message);
-    this.unreliableChannel.send(JSON.stringify(message));
+    console.log("broadcastData", data);
+    this.publisher.unreliableChannel.send(JSON.stringify({ dataType, data }));
   }
 
   broadcastDataGuaranteed(dataType, data) {
-    var message = { dataType, data, transaction: randomString(3) };
-    // console.log("broadcastDataGuaranteed:", message.transaction, message);
-    this.reliableChannel.send(JSON.stringify(message));
+    console.log("broadcastDataGuaranteed", data);
+    this.publisher.reliableChannel.send(JSON.stringify({ dataType, data }));
   }
 }
 
