@@ -36,6 +36,7 @@
     "easyrtc": "1.1.0",
     "express": "^4.10.7",
     "firebase-key-encode": "^0.1.5",
+    "minijanus": "^0.1.1",
     "serve-static": "^1.8.0",
     "simple-peer": "^8.1.1",
     "socket.io": "^1.4.5",
