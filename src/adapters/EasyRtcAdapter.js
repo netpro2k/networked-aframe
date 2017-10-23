@@ -58,6 +58,7 @@ class EasyRtcAdapter extends INetworkAdapter {
   connect() {
     var that = this;
     var connectedCallback = function(id) {
+      that._storeAudioStream(that.easyrtc.myEasyrtcid, that.easyrtc.getLocalStream());
       that._myRoomJoinTime = that._getRoomJoinTime(id);
       that.connectSuccess(id);
     };
@@ -132,38 +133,37 @@ class EasyRtcAdapter extends INetworkAdapter {
     }
   }
 
-  getAudioStream(clientId) {
+  getMediaStream(clientId) {
     var that = this;
     if(this.audioStreams[clientId]) {
-      naf.log.write("Already had audio for " + clientId);
+      naf.log.write('Already had audio for ' + clientId);
       return Promise.resolve(this.audioStreams[clientId]);
     } else {
-      naf.log.write("Wating on audio for " + clientId);
+      naf.log.write('Wating on audio for ' + clientId);
       return new Promise(function(resolve) {
         that.pendingAudioRequest[clientId] = resolve;
       });
     }
   }
 
-  enableMicrophone(enabled) {
-    this.easyrtc.enableMicrophone(enabled);
-  }
 
   /**
    * Privates
    */
 
+  _storeAudioStream(easyrtcid, stream) {
+    this.audioStreams[easyrtcid] = stream;
+    if(this.pendingAudioRequest[easyrtcid]) {
+      naf.log.write('got pending audio for ' + easyrtcid);
+      this.pendingAudioRequest[easyrtcid](stream);
+      delete this.pendingAudioRequest[easyrtcid](stream);
+    }
+  }
+
   _connectWithAudio(connectSuccess, connectFailure) {
     var that = this;
 
-    this.easyrtc.setStreamAcceptor(function(easyrtcid, stream) {
-      that.audioStreams[easyrtcid] = stream;
-      if(that.pendingAudioRequest[easyrtcid]) {
-        naf.log.write("got pending audio for " + easyrtcid);
-        that.pendingAudioRequest[easyrtcid](stream);
-        delete that.pendingAudioRequest[easyrtcid](stream);
-      }
-    });
+    this.easyrtc.setStreamAcceptor(this._storeAudioStream.bind(this));
 
     this.easyrtc.setOnStreamClosed(function (easyrtcid) {
       delete that.audioStreams[easyrtcid];
